@@ -1,69 +1,94 @@
-import os
-from telegram import Update, Bot
+import logging
+from telegram import Update, ForceReply
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-import json
+import os
+import openai
 
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
-ALLOWED_CHAT_IDS = list(map(int, os.getenv("ALLOWED_CHAT_IDS").split(",")))
-GPT4_DAILY_LIMIT = int(os.getenv("GPT4_DAILY_LIMIT", "20"))
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gpt-3.5-turbo")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-USE_REPLY_ONLY = os.getenv("USE_REPLY_ONLY", "true").lower() == "true"
+# 初始化日志
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
+# 环境变量读取
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
+GPT4_DAILY_LIMIT = int(os.environ.get("GPT4_DAILY_LIMIT", "30"))
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_API_MODEL = os.environ.get("OPENAI_API_MODEL", "gpt-4o")
+
+openai.api_key = OPENAI_API_KEY
+
+# 简单用户请求记录
 user_usage = {}
-faq_data = {}
 
-def load_faq_data():
-    global faq_data
-    try:
-        with open("faq_data.json", "r", encoding="utf-8") as f:
-            faq_data = json.load(f)
-    except Exception as e:
-        faq_data = {}
-
-def get_faq_answer(message):
-    for keyword, answer in faq_data.items():
-        if keyword in message:
-            return answer
-    return None
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# 指令：状态
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-
-    if USE_REPLY_ONLY and update.message and not update.message.text.startswith("@"):
+    if user_id != ADMIN_USER_ID:
         return
+    await update.message.reply_text("盈盈运行中 ✅\n当前模型：" + OPENAI_API_MODEL)
 
-    if chat_id not in ALLOWED_CHAT_IDS:
+# 指令：增加管理员（仅演示，无实际存储）
+async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("功能占位：管理员权限尚未持久化实现")
+
+# 私聊限制
+async def private_chat_block(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
         return
+    await chat_handler(update, context)
 
-    text = update.message.text.strip()
+# 主逻辑
+async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    message = update.message.text.strip()
+
     if user_id not in user_usage:
-        user_usage[user_id] = {"gpt4_count": 0}
+        user_usage[user_id] = 0
 
-    if "/状态" in text and user_id == ADMIN_USER_ID:
-        usage = user_usage.get(user_id, {})
-        await update.message.reply_text(f"已用GPT-4：{usage.get('gpt4_count', 0)}次/每日上限{GPT4_DAILY_LIMIT}")
-        return
-
-    if "/增加管理员" in text and user_id == ADMIN_USER_ID:
-        try:
-            new_admin_id = int(text.split()[-1])
-            if new_admin_id:
-                await update.message.reply_text(f"管理员 {new_admin_id} 已添加（模拟）")
-        except:
-            await update.message.reply_text("格式错误，应为：/增加管理员 123456789")
-        return
-
-    answer = get_faq_answer(text)
-    if answer:
-        await update.message.reply_text(answer)
+    if user_usage[user_id] >= GPT4_DAILY_LIMIT:
+        model = "gpt-3.5-turbo"
+        notice = "\n⚠️ 您的 GPT-4 使用额度已用尽，已切换为 GPT-3.5。"
     else:
-        await update.message.reply_text("抱歉，我不太明白您的意思。")
+        model = OPENAI_API_MODEL
+        notice = ""
+
+    user_usage[user_id] += 1
+
+    try:
+        response = openai.ChatCompletion.create(
+            model=model,
+            messages=[{"role": "user", "content": message}]
+        )
+        answer = response.choices[0].message.content.strip()
+    except Exception as e:
+        answer = "出错了：" + str(e)
+
+    await update.message.reply_text(answer + notice)
+
+# FAQ 示例
+faq_data = {
+    "VIP返水怎么算": "VIP返水根据不同等级发放比例，VIP1 为 0.5%，VIP5 为 1.5%。详情请咨询客服。",
+}
+
+async def faq_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    for keyword, reply in faq_data.items():
+        if keyword in text:
+            await update.message.reply_text(reply)
+            return
+    await chat_handler(update, context)
+
+# 启动 bot
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("状态", status))
+    app.add_handler(CommandHandler("增加管理员", add_admin))
+
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, private_chat_block))
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, faq_handler))
+
+    print("YingYing bot 正在运行...")
+    app.run_polling()
 
 if __name__ == "__main__":
-    load_faq_data()
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    app.run_polling()
+    main()
